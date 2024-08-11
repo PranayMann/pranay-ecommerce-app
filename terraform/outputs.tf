@@ -1,11 +1,14 @@
-output "node_addresses" {
-  value = ["${aws_instance.ci-sockshop-k8s-node.*.public_dns}"]
+output "cluster_endpoint" {
+  value = module.eks.cluster_endpoint
 }
 
-output "master_address" {
-  value = "${aws_instance.ci-sockshop-k8s-master.public_dns}"
+output "access_entries" {
+  value = module.eks.access_entries
 }
 
-output "sock_shop_address" {
-  value = "${aws_elb.ci-sockshop-k8s-elb.dns_name}"
+output "eks_managed_node_groups_autoscaling_group_names" {
+  value = module.eks.eks_managed_node_groups_autoscaling_group_names
 }
+
+
+

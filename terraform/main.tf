@@ -1,135 +1,111 @@
 provider "aws" {
   region = "${var.aws_region}"
+  profile = "default"
 }
 
-resource "aws_security_group" "k8s-security-group" {
-  name        = "md-k8s-security-group"
-  description = "allow all internal traffic, ssh, http from anywhere"
-  ingress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    self        = "true"
-  }
-  ingress {
-    from_port   = 22
-    to_port     = 22
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  ingress {
-    from_port   = 80
-    to_port     = 80
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  ingress {
-    from_port   = 9411
-    to_port     = 9411
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  ingress {
-    from_port   = 30001
-    to_port     = 30001
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  ingress {
-    from_port   = 30002
-    to_port     = 30002
-    protocol    = "tcp"
-    cidr_blocks = ["0.0.0.0/0"]
-  }
-  ingress {
-   from_port   = 31601
-   to_port     = 31601
-   protocol    = "tcp"
-   cidr_blocks = ["0.0.0.0/0"]
- }
-  egress {
-    from_port   = 0
-    to_port     = 0
-    protocol    = "-1"
-    cidr_blocks = ["0.0.0.0/0"]
+# Create a VPC
+resource "aws_vpc" "eks_vpc" {
+  cidr_block           = "10.0.0.0/16"
+  enable_dns_support   = true
+  enable_dns_hostnames = true
+  tags = {
+    Name = "eks_vpc"
   }
 }
 
-resource "aws_instance" "ci-sockshop-k8s-master" {
-  instance_type   = "${var.master_instance_type}"
-  ami             = "${lookup(var.aws_amis, var.aws_region)}"
-  key_name        = "${var.key_name}"
-  security_groups = ["${aws_security_group.k8s-security-group.name}"]
-  tags {
-    Name = "ci-sockshop-k8s-master"
-  }
-
-  connection {
-    user = "ubuntu"
-    private_key = "${file("${var.private_key_path}")}"
-  }
-
-  provisioner "file" {
-    source = "deploy/kubernetes/manifests"
-    destination = "/tmp/"
-  }
-
-  provisioner "remote-exec" {
-    inline = [
-      "sudo curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -",
-      "sudo echo \"deb http://apt.kubernetes.io/ kubernetes-xenial main\" | sudo tee --append /etc/apt/sources.list.d/kubernetes.list",
-      "sudo apt-get update",
-      "sudo apt-get install -y docker.io",
-      "sudo apt-get install -y kubelet kubeadm kubectl kubernetes-cni"
-    ]
+#Create and attach internet gateway to VPC
+resource "aws_internet_gateway" "igw" {
+  vpc_id = aws_vpc.eks_vpc.id
+  tags = {
+    Name = "eks_igw"
   }
 }
 
-resource "aws_instance" "ci-sockshop-k8s-node" {
-  instance_type   = "${var.node_instance_type}"
-  count           = "${var.node_count}"
-  ami             = "${lookup(var.aws_amis, var.aws_region)}"
-  key_name        = "${var.key_name}"
-  security_groups = ["${aws_security_group.k8s-security-group.name}"]
-  tags {
-    Name = "ci-sockshop-k8s-node"
+#Create route table
+resource "aws_route_table" "rt" {
+  vpc_id = aws_vpc.eks_vpc.id
+  route {
+    cidr_block = "0.0.0.0/0"
+    gateway_id = aws_internet_gateway.igw.id
   }
-
-  connection {
-    user = "ubuntu"
-    private_key = "${file("${var.private_key_path}")}"
+  tags = {
+    Name = "eks_rt"
   }
-
-  provisioner "remote-exec" {
-    inline = [
-      "sudo curl -s https://packages.cloud.google.com/apt/doc/apt-key.gpg | sudo apt-key add -",
-      "sudo echo \"deb http://apt.kubernetes.io/ kubernetes-xenial main\" | sudo tee --append /etc/apt/sources.list.d/kubernetes.list",
-      "sudo apt-get update",
-      "sudo apt-get install -y docker.io",
-      "sudo apt-get install -y kubelet kubeadm kubectl kubernetes-cni",
-      "sudo sysctl -w vm.max_map_count=262144"
-    ]
+}
+#Create a subnet
+resource "aws_subnet" "eks_subnet" {
+  count = 2
+  vpc_id            = aws_vpc.eks_vpc.id
+  cidr_block        = cidrsubnet(aws_vpc.eks_vpc.cidr_block, 8, count.index)
+  availability_zone = element(data.aws_availability_zones.available.names, count.index)
+  map_public_ip_on_launch = true
+  tags = {
+    Name = "eks_subnet_${count.index + 1}"
   }
 }
 
-resource "aws_elb" "ci-sockshop-k8s-elb" {
-  depends_on = [ "aws_instance.ci-sockshop-k8s-node" ]
-  name = "ci-sockshop-k8s-elb"
-  instances = ["${aws_instance.ci-sockshop-k8s-node.*.id}"]
-  availability_zones = ["${data.aws_availability_zones.available.names}"]
-  security_groups = ["${aws_security_group.k8s-security-group.id}"] 
-  listener {
-    lb_port = 80
-    instance_port = 30001
-    lb_protocol = "http"
-    instance_protocol = "http"
+#Associate route tabel with subnet 
+resource "aws_route_table_association" "rta" {
+  count = 2
+  subnet_id      = element(aws_subnet.eks_subnet.*.id, count.index)
+  route_table_id = aws_route_table.rt.id
+}
+
+#Associate NAT gateway with the public subnet
+resource "aws_nat_gateway" "nat_gw" {
+  allocation_id = aws_eip.nat_eip.id
+  subnet_id     = element(aws_subnet.eks_subnet.*.id, 0)
+  tags = {
+    Name = "eks_nat_gw"
+  }
+}
+
+#Make NAT ip as elastic
+resource "aws_eip" "nat_eip" {
+  vpc = true
+}
+
+#Create EKS cluster with node group and access entry
+module "eks" {
+  source          = "terraform-aws-modules/eks/aws"
+  cluster_name    = "Test-cluster"
+  cluster_version = "1.30" # Specify the Kubernetes version
+  subnet_ids        = aws_subnet.eks_subnet[*].id
+  vpc_id          = aws_vpc.eks_vpc.id
+  cluster_endpoint_public_access  = true
+  eks_managed_node_groups = {
+    eks_nodes = {
+      # Starting on 1.30, AL2023 is the default AMI type for EKS managed node groups
+      ami_type       = "AL2023_x86_64_STANDARD"
+      instance_types = ["t3.large"]
+
+      min_size     = 2
+      max_size     = 10
+      desired_size = 2
+    }
+    }
+  enable_cluster_creator_admin_permissions = true
+  access_entries = {
+    # One access entry with a policy associated
+    admin = {
+      kubernetes_groups = []
+      principal_arn     = "arn:aws:iam::123456789012:role/eksclusterrole"
+
+      policy_associations = {
+        admin_policy = {
+          policy_arn = "arn:aws:eks::aws:cluster-access-policy/AmazonEKSViewPolicy"
+          access_scope = {
+            namespaces = ["default"]
+            type       = "namespace"
+          }
+        }
+      }
+    }
   }
 
-  listener {
-    lb_port = 9411
-    instance_port = 30002
-    lb_protocol = "http"
-    instance_protocol = "http"
+  tags = {
+    Environment = "Test-cluster"
+    Terraform   = "true"
   }
 
 }
