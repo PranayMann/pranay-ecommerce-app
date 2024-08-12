@@ -2,15 +2,17 @@ apiVersion: networking.k8s.io/v1
 kind: Ingress
 metadata:
   name: ecommerce-ingress
-  namespace: sock-shop
+  namespace: vcluster-customer-b
   annotations:
-    nginx.ingress.kubernetes.io/rewrite-target: /
+    kubernetes.io/ingress.class: alb
+    alb.ingress.kubernetes.io/scheme: internet-facing
+    alb.ingress.kubernetes.io/target-type: instance
 spec:
   rules:
-  - host: ecommerce-app.com
-    http:
+   - host: example.com
+     http:
       paths:
-      - path: /
+      - path: /*
         pathType: Prefix
         backend:
           service:
